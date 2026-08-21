@@ -60,6 +60,7 @@ except Exception as e:
 traffic_summary = defaultdict(int)
 ip_ports_tracker = defaultdict(set)
 ip_packet_tracker = defaultdict(int)
+alert_cooldown = {}
 lock = threading.Lock()
 
 def process_packet(packet):
@@ -93,11 +94,14 @@ def process_packet(packet):
                 # ใช้ Lock เพื่อความปลอดภัยเมื่อแก้ไขตัวแปรที่ใช้ร่วมกับ Thread อื่น
                 with lock:
                     traffic_summary[key] += 1
-                    ip_ports_tracker[src_ip].add(dst_port)
-                    ip_packet_tracker[src_ip] += 1
                     
-                    # ตรวจสอบเงื่อนไขฉุกเฉิน (Threshold)
-                    if len(ip_ports_tracker[src_ip]) > 10 or ip_packet_tracker[src_ip] > 30:
+                    # ข้ามพอร์ต 80, 443, 53 สำหรับการนับเข้าเงื่อนไขฉุกเฉิน
+                    if dst_port not in [80, 443, 53]:
+                        ip_ports_tracker[src_ip].add(dst_port)
+                        ip_packet_tracker[src_ip] += 1
+                    
+                    # ตรวจสอบเงื่อนไขฉุกเฉิน (Threshold) - กวาดพอร์ต >= 15 หรือส่งเกิน 250 แพ็กเก็ต
+                    if len(ip_ports_tracker[src_ip]) >= 15 or ip_packet_tracker[src_ip] > 250:
                         trigger_emergency = True
                         
                         # ดึงข้อมูลของ IP นี้ออกมาจาก Buffer
@@ -154,14 +158,7 @@ def process_single_ip_emergency(source_ip, traffic_list):
                 if risk_level in ["High", "Medium"]:
                     send_telegram_alert(res_source_ip, risk_level, res.get("description", "No description provided"))
     else:
-        print(f"[*] (Mock/Fallback) สร้างข้อมูลจำลองฉุกเฉินสำหรับ IP {source_ip}")
-        total_packets = sum(item["packet_count"] for item in traffic_list)
-        mock_result = {
-            "risk_level": "High",
-            "description": f"AI Detected (Mock): พฤติกรรมเข้าข่ายโจมตีอย่างรุนแรง ({total_packets} packets) จากการสแกนพอร์ตหรือยิงรัว"
-        }
-        save_to_firebase(source_ip, mock_result)
-        send_telegram_alert(source_ip, mock_result["risk_level"], mock_result["description"])
+        print(f"[!] AI ตอบกลับมาผิดพลาดหรือไม่มีข้อมูล (Bypassed Mock Data สำหรับ IP {source_ip})")
 
 def analyze_traffic_with_ai(traffic_data):
     """
@@ -256,6 +253,17 @@ def send_telegram_alert(source_ip, risk_level, description):
     """
     ส่งการแจ้งเตือนผ่าน Telegram เมื่อพบความเสี่ยง
     """
+    global alert_cooldown
+    
+    current_time = time.time()
+    if source_ip in alert_cooldown:
+        time_since_last_alert = current_time - alert_cooldown[source_ip]
+        if time_since_last_alert < 180:
+            print(f"[DEBUG] ⏳ ข้ามการแจ้งเตือน Telegram สำหรับ IP {source_ip} (Cooldown เหลือ {int(180 - time_since_last_alert)} วินาที)")
+            return
+            
+    alert_cooldown[source_ip] = current_time
+    
     load_dotenv()
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -360,20 +368,7 @@ def process_and_reset_summary():
                         if risk_level in ["High", "Medium"]:
                             send_telegram_alert(source_ip, risk_level, res.get("description", "No description provided"))
             else:
-                # Mock Data Fallback ในกรณีที่ไม่ได้ใส่ API Key หรือ AI ตอบกลับผิดพลาด
-                print("[*] (Mock/Fallback) สร้างข้อมูลจำลองเพื่ออัปเดตหน้า Dashboard")
-                for source_ip, data in suspicious_traffic.items():
-                    total_packets = sum(item["packet_count"] for item in data)
-                    mock_result = {
-                        "risk_level": "High" if total_packets > 50 else "Medium",
-                        "description": f"AI Detected (Mock): ตรวจพบความถี่การเชื่อมต่อสูง ({total_packets} packets) ภายใน 30 วินาที"
-                    }
-                    save_to_firebase(source_ip, mock_result)
-                    
-                    # ส่งแจ้งเตือน Telegram เฉพาะระดับ High และ Medium สำหรับ Mock Data
-                    mock_risk = mock_result.get("risk_level")
-                    if mock_risk in ["High", "Medium"]:
-                        send_telegram_alert(source_ip, mock_risk, mock_result.get("description", ""))
+                print(f"[!] AI ตอบกลับมาผิดพลาดหรือไม่มีข้อมูล (Bypassed Mock Data)")
 
 def main():
     print("[*] เริ่มการทำงาน: Real-time Network Traffic Sniffer (AI & Firebase Integrated)")
