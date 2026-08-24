@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { collection, onSnapshot, query, orderBy } from 'firebase/firestore';
+import { collection, onSnapshot, query, orderBy, doc, setDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 
 export interface NetworkAlert {
@@ -16,6 +16,7 @@ export function useNetworkAlerts() {
   const [alerts, setAlerts] = useState<NetworkAlert[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isClearing, setIsClearing] = useState(false);
 
   useEffect(() => {
     if (!db) {
@@ -67,5 +68,19 @@ export function useNetworkAlerts() {
     }
   }, []);
 
-  return { alerts, loading, error };
+  const clearAllAlerts = async () => {
+    if (!db) return;
+    setIsClearing(true);
+    try {
+      const commandRef = doc(db, 'system_control', 'commands');
+      await setDoc(commandRef, { action: 'clear_logs', timestamp: Date.now() }, { merge: true });
+    } catch (err: any) {
+      console.error("Error clearing alerts:", err);
+      setError(err.message);
+    } finally {
+      setIsClearing(false);
+    }
+  };
+
+  return { alerts, loading, error, clearAllAlerts, isClearing };
 }

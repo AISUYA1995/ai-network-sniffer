@@ -1,0 +1,16 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // กำหนดให้ทุกคนสามารถเขียน log จาก Python Backend ได้ (ผ่าน Admin SDK)
+    // แต่สำหรับฝั่ง Frontend จะต้องล็อกอินก่อนถึงจะอ่านข้อมูล และสั่งล้างข้อมูลได้
+    
+    match /network_alerts/{document} {
+      allow read: if request.auth != null; 
+      allow write: if false; // ห้ามลบ/เขียน จากหน้าเว็บโดยตรง ให้ลบผ่านระบบ Backend
+    }
+    
+    match /system_control/commands {
+      allow read, write: if request.auth != null; // ฝั่งเว็บล็อกอินแล้วถึงจะส่งคำสั่งได้
+    }
+  }
+}
