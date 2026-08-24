@@ -12,13 +12,18 @@ export interface NetworkAlert {
   [key: string]: any;
 }
 
-export function useNetworkAlerts() {
+export function useNetworkAlerts(isAuthenticated: boolean) {
   const [alerts, setAlerts] = useState<NetworkAlert[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isClearing, setIsClearing] = useState(false);
 
   useEffect(() => {
+    if (!isAuthenticated) {
+      setLoading(false);
+      return;
+    }
+
     if (!db) {
       setError("Firebase configuration is missing.");
       setLoading(false);
@@ -66,7 +71,7 @@ export function useNetworkAlerts() {
       setError(err.message);
       setLoading(false);
     }
-  }, []);
+  }, [isAuthenticated]);
 
   const clearAllAlerts = async () => {
     if (!db) return;

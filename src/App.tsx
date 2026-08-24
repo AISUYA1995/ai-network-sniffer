@@ -75,7 +75,7 @@ export default function Dashboard() {
     if (auth) await signOut(auth);
   };
 
-  const { alerts, loading, error, clearAllAlerts, isClearing } = useNetworkAlerts();
+  const { alerts, loading, error, clearAllAlerts, isClearing } = useNetworkAlerts(!!user);
   const [isModalOpen, setIsModalOpen] = useState(false);
 
   const handleClearLogs = async () => {
