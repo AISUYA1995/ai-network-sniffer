@@ -63,6 +63,13 @@ ip_packet_tracker = defaultdict(int)
 alert_cooldown = {}
 lock = threading.Lock()
 
+# ----------------------------------------------------
+# Security / Safeguard Constants
+# ----------------------------------------------------
+MAX_TRACKED_IPS = 5000  # ป้องกัน OOM จาก IP Spoofing
+GLOBAL_TELEGRAM_COOLDOWN = 60  # วินาที (ป้องกัน Telegram API Rate Limit)
+last_global_telegram_alert = 0
+
 def process_packet(packet):
     """
     ฟังก์ชัน Callback ที่จะถูกเรียกใช้ทุกครั้งที่ดักจับแพ็กเก็ตได้
@@ -93,6 +100,14 @@ def process_packet(packet):
                 
                 # ใช้ Lock เพื่อความปลอดภัยเมื่อแก้ไขตัวแปรที่ใช้ร่วมกับ Thread อื่น
                 with lock:
+                    # ป้องกัน OOM จาก IP Spoofing
+                    if len(traffic_summary) > MAX_TRACKED_IPS * 10:
+                        traffic_summary.clear()
+                        ip_ports_tracker.clear()
+                        ip_packet_tracker.clear()
+                        print("[!] Memory Safeguard: ล้าง Buffer เนื่องจากมีรายการมากเกินไป (อาจโดน IP Spoofing)")
+                        return
+
                     traffic_summary[key] += 1
                     
                     # ข้ามพอร์ต 80, 443, 53 สำหรับการนับเข้าเงื่อนไขฉุกเฉิน
@@ -253,9 +268,15 @@ def send_telegram_alert(source_ip, risk_level, description):
     """
     ส่งการแจ้งเตือนผ่าน Telegram เมื่อพบความเสี่ยง
     """
-    global alert_cooldown
+    global alert_cooldown, last_global_telegram_alert
     
     current_time = time.time()
+    
+    # Global Rate Limiting
+    if current_time - last_global_telegram_alert < GLOBAL_TELEGRAM_COOLDOWN:
+        print(f"[DEBUG] ⏳ ข้ามการแจ้งเตือน Telegram (ติด Global Cooldown)")
+        return
+        
     if source_ip in alert_cooldown:
         time_since_last_alert = current_time - alert_cooldown[source_ip]
         if time_since_last_alert < 180:
@@ -263,6 +284,7 @@ def send_telegram_alert(source_ip, risk_level, description):
             return
             
     alert_cooldown[source_ip] = current_time
+    last_global_telegram_alert = current_time
     
     load_dotenv()
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -370,13 +392,62 @@ def process_and_reset_summary():
             else:
                 print(f"[!] AI ตอบกลับมาผิดพลาดหรือไม่มีข้อมูล (Bypassed Mock Data)")
 
+def listen_for_commands():
+    """
+    รับคำสั่งจาก Frontend เพื่อสั่งการทำงานต่างๆ เช่น Clear Logs 
+    โดยไม่จำเป็นต้องให้ฝั่ง Frontend มีสิทธิ์เข้าถึงฐานข้อมูล Network Alerts โดยตรง
+    """
+    if db is None:
+        return
+        
+    print("[*] กำลังฟังคำสั่งจากระบบ (System Commands) ...")
+    
+    def on_snapshot(doc_snapshot, changes, read_time):
+        for doc in doc_snapshot:
+            data = doc.to_dict()
+            if data and data.get("action") == "clear_logs":
+                print("\n[!] ได้รับคำสั่งล้างข้อมูล (Clear Logs) จาก Frontend...")
+                try:
+                    # ดึงข้อมูลทั้งหมดใน network_alerts และลบทิ้ง (Batch delete)
+                    alerts_ref = db.collection("network_alerts")
+                    docs = alerts_ref.stream()
+                    
+                    batch = db.batch()
+                    deleted_count = 0
+                    for d in docs:
+                        batch.delete(d.reference)
+                        deleted_count += 1
+                        # Firestore batch limit is 500, simple mitigation
+                        if deleted_count % 400 == 0:
+                            batch.commit()
+                            batch = db.batch()
+                            
+                    batch.commit()
+                    print(f"[*] ลบข้อมูลสำเร็จจำนวน {deleted_count} รายการ!")
+                    
+                    # รีเซ็ตคำสั่งเป็น empty เพื่อไม่ให้ทำงานซ้ำ
+                    doc.reference.set({"action": "none", "last_cleared": datetime.now().isoformat()})
+                except Exception as e:
+                    print(f"[DEBUG ERROR] เกิดข้อผิดพลาดขณะเคลียร์ข้อมูล: {e}")
+
+    try:
+        # สมัครรับการแจ้งเตือนแบบเรียลไทม์จากระบบ
+        doc_ref = db.collection("system_control").document("commands")
+        doc_ref.on_snapshot(on_snapshot)
+    except Exception as e:
+        print(f"[DEBUG ERROR] ไม่สามารถสร้าง Listener สำหรับคำสั่งได้: {e}")
+
 def main():
     print("[*] เริ่มการทำงาน: Real-time Network Traffic Sniffer (AI & Firebase Integrated)")
+    print("[*] คำแนะนำความปลอดภัย: แนะนำให้รันด้วย Docker หรือ setcap แทนการใช้สิทธิ์ root ตรงๆ")
     print("[*] กดปุ่ม Ctrl+C เพื่อหยุดการทำงาน")
     print("-" * 60)
     
     printer_thread = threading.Thread(target=process_and_reset_summary, daemon=True)
     printer_thread.start()
+    
+    # เปิด Listener คำสั่ง (Background)
+    listen_for_commands()
     
     try:
         sniff(prn=process_packet, store=False)
